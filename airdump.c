@@ -103,15 +103,17 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    // 준비 완료 후 패킷 수신 루프로 이동
-    printf("Interface %s is ready in monitor mode. Starting to capture...\n", ifr.ifr_name);
 
+#ifndef DEBUG
+    setup_monitor();
+#endif
 
     // 5. 패킷 수신 루프
     while (1) {
         unsigned char buf[65536];
         struct beacon_frame *beacon;
         struct ieee80211_radiotap_header *radiotap = (struct ieee80211_radiotap_header *)buf;
+        info res;
         ssize_t num_bytes = recvfrom(sockfd, buf, sizeof(buf), 0, NULL, NULL);
         if (num_bytes < 0) {
             perror("recvfrom");
@@ -121,11 +123,13 @@ int main(int argc, char *argv[]) {
         beacon = (struct beacon_frame *)(buf + radiotap->it_len);
         if(beacon->magic == 0x0080)
         {
-            printf("Captured %zd bytes\n", num_bytes);
-            parse_radiotap_body(radiotap->it_present, buf+sizeof(struct ieee80211_radiotap_header), beacon);
-            print_addr("BSS ID: ",beacon->bss_id);
-            parse_becon_body((void *)beacon + sizeof(struct beacon_frame), buf+num_bytes);
+#ifdef DEBUG            
             printf("----------\n");
+            printf("Captured %zd bytes\n", num_bytes);
+            print_addr("BSS ID: ",beacon->bss_id);
+#endif
+            parse_radiotap_body(radiotap->it_present, buf+sizeof(struct ieee80211_radiotap_header), beacon, &res);
+            parse_becon_body((void *)beacon + sizeof(struct beacon_frame), buf+num_bytes, &res);
         }
 
     }
@@ -134,7 +138,7 @@ int main(int argc, char *argv[]) {
     return 0;
 }
 
-void parse_becon_body(void *start, void *end)
+void parse_becon_body(void *start, void *end, info *res)
 {
     uint64_t *timestamp;
     uint16_t *interver;
@@ -142,10 +146,11 @@ void parse_becon_body(void *start, void *end)
     timestamp = start;
     interver = start + 8;
     cap = start + 10;
+#ifdef DEBUG 
     printf("Timestamp: 0x%lx\n", *timestamp);
     printf("Interval: 0x%x\n", *interver);
     printf("Capa: 0x%x\n", *cap);
-
+#endif
     for(void *pos=start+12;pos<end;)
     {
         uint8_t tag_num = *(u_int8_t *)pos;
@@ -154,7 +159,12 @@ void parse_becon_body(void *start, void *end)
         switch (tag_num)
         {
             case TAG_SSID_NAME:
+                res->essid = (char *)pos;
+#ifdef DEBUG 
                 printf("SSID(%d): %.*s\n", (int)len, (int)len, (char *)pos);
+#else           
+                return;
+#endif
                 break;
             case TAG_RSN:
             default:
@@ -165,7 +175,7 @@ void parse_becon_body(void *start, void *end)
 }
 
 #define NOT_YET() {asm volatile("int $3");}
-void parse_radiotap_body(uint32_t flags, void *start, void *end)
+void parse_radiotap_body(uint32_t flags, void *start, void *end, info *res)
 {
     void *pos=start;
     
@@ -189,8 +199,13 @@ void parse_radiotap_body(uint32_t flags, void *start, void *end)
     if (flags & RADIOTAP_CHANNEL)              { pos += 4; }  // Channel
     if (flags & RADIOTAP_FHSS)                 { pos += 2; }  // FHSS
     if (flags & RADIOTAP_ANTENNA_SIGNAL)
-    { 
+    {
+#ifdef DEBUG
         printf("dBm: %d\n", *(char *)pos);
+#else
+        res->pwr=*(char *)pos;
+        return;
+#endif
         pos += 1;
     }  // Antenna signal
     if (flags & RADIOTAP_ANTENNA_NOISE)        { pos += 1; }  // Antenna noise
@@ -245,4 +260,10 @@ void parse_radiotap_body(uint32_t flags, void *start, void *end)
 	    fprintf(stderr, "radiotap header: parsing fail\n");
         NOT_YET();
     }
+}
+
+
+void setup_monitor()
+{
+    return;
 }

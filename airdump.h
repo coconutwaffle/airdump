@@ -58,7 +58,14 @@ struct beacon_frame {
 #define RADIOTAP_U_SIG                (1 << 1)  // U-SIG
 #define RADIOTAP_EHT                  (1 << 2)  // EHT
 
-void parse_radiotap_body(u_int32_t flags, void *start, void *end);
-void parse_becon_body(void *start, void *end);
-
+struct info {
+    char pwr;
+    char padding;
+    addr bssid;
+    char *essid;
+};
+typedef struct info info;
+void parse_radiotap_body(u_int32_t flags, void *start, void *end, info * res);
+void parse_becon_body(void *start, void *end, info *res);
+void setup_monitor();
 #endif
