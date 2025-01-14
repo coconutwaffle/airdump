@@ -1,26 +1,9 @@
 #ifndef AIRDUMP_25_1_10
 #define AIRDUMP_25_1_10
 
-struct ieee80211_radiotap_header {
-        u_int8_t        it_version;
-        u_int8_t        it_pad;
-        u_int16_t       it_len;
-        u_int32_t       it_present;
-} __attribute__((__packed__));
-
-typedef char addr[6];
-struct beacon_frame {
-    u_int16_t magic;
-    u_int16_t dur;
-    addr dst_addr;
-    addr src_addr;
-    addr bss_id;
-    u_int16_t extra;
-} __attribute__((__packed__));
-
-
 #define TAG_SSID_NAME 0
 #define TAG_RSN 48
+#define MAP_MAX 0x200
 
 
 
@@ -58,14 +41,49 @@ struct beacon_frame {
 #define RADIOTAP_U_SIG                (1 << 1)  // U-SIG
 #define RADIOTAP_EHT                  (1 << 2)  // EHT
 
+#define BUILD_ERR() {asm volatile("int $3");}
+
+struct ieee80211_radiotap_header {
+        u_int8_t        it_version;
+        u_int8_t        it_pad;
+        u_int16_t       it_len;
+        u_int32_t       it_present;
+} __attribute__((__packed__));
+
+typedef unsigned char addr[6];
+struct beacon_frame {
+    u_int16_t magic;
+    u_int16_t dur;
+    addr dst_addr;
+    addr src_addr;
+    addr bss_id;
+    u_int16_t extra;
+} __attribute__((__packed__));
+
 struct info {
     char pwr;
     char padding;
     addr bssid;
     char *essid;
+    int length;
+    int beacon_cnt;
+    int channal;
 };
+struct node {
+    struct info data;
+    struct node *next;
+};
+struct node* map[MAP_MAX];
 typedef struct info info;
+typedef struct node Node;
+
 void parse_radiotap_body(u_int32_t flags, void *start, void *end, info * res);
 void parse_becon_body(void *start, void *end, info *res);
 void setup_monitor();
+void submit_info(info* res);
+int hash(addr key);
+void change_channal();
+void print_info(info* res);
+void print_addr(char *str, addr adr);
+
 #endif

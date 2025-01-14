@@ -10,58 +10,23 @@
 #include <net/if.h>
 #include <linux/if_packet.h>
 #include <linux/if_ether.h>
+#include <linux/wireless.h>
 #include <errno.h>
 #include <ctype.h>
-
+#include <signal.h>
+#include <pthread.h>
 #include "airdump.h"
 
-void print_addr(char *str, addr adr)
-{
-    unsigned char *ptr=adr;
-    if(str) printf("%s", str);
-    for(int i=0;i<6;i++)
-    {
-        printf("%02x:",ptr[i]);
-    }
-    printf("\b \n");
-}
+int stop = 0;
+int sock_ctl;
+int sockfd;
+int num_frequency;
+struct iwreq req;
+static int chan =0;
+pthread_t monitor_thread;
 
-// HEX 덤프 함수
-void hexDump(const void *buffer, size_t size) {
-    const unsigned char *data = (const unsigned char *)buffer;
-    size_t i, j;
-
-    printf("Address         Hexadecimal Values                    ASCII\n");
-    printf("---------------------------------------------------------------\n");
-
-    for (i = 0; i < size; i += 16) {
-        // 주소 출력
-        printf("%08zx  ", i);
-
-        // HEX 출력
-        for (j = 0; j < 16; ++j) {
-            if (i + j < size)
-                printf("%02x ", data[i + j]);
-            else
-                printf("   ");  // 남은 공간 채우기
-        }
-
-        printf(" ");
-
-        // ASCII 출력
-        for (j = 0; j < 16; ++j) {
-            if (i + j < size) {
-                unsigned char c = data[i + j];
-                printf("%c", isprint(c) ? c : '.');  // 출력 가능한 문자 아니면 '.' 출력
-            }
-        }
-
-        printf("\n");
-    }
-}
 
 int main(int argc, char *argv[]) {
-    int sockfd;
     struct ifreq ifr;
     struct sockaddr_ll sll;
     int ret;
@@ -72,14 +37,14 @@ int main(int argc, char *argv[]) {
         return 2;
     }
 
-    // 1. 소켓 생성: PF_PACKET / SOCK_RAW / ETH_P_ALL(모든 이더타입 캡처)
+    // Create socket: PF_PACKET / SOCK_RAW / ETH_P_ALL
     sockfd = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
     if (sockfd < 0) {
         perror("socket");
         return 2;
     }
 
-    // 2. 인터페이스 인덱스 가져오기
+    // Retrieve the interface index.
     memset(&ifr, 0, sizeof(ifr));
     strncpy(ifr.ifr_name, argv[1], IFNAMSIZ - 1);
 
@@ -89,13 +54,13 @@ int main(int argc, char *argv[]) {
         return 2;
     }
 
-    // 3. 소켓 주소 구조체 설정
+    // Set the socket address structure.
     memset(&sll, 0, sizeof(sll));
     sll.sll_family   = AF_PACKET;
     sll.sll_ifindex  = ifr.ifr_ifindex;
     sll.sll_protocol = htons(ETH_P_ALL);
 
-    // 4. 바인드
+    // Set the socket address structure.
     ret = bind(sockfd, (struct sockaddr *)&sll, sizeof(sll));
     if (ret < 0) {
         perror("bind");
@@ -103,23 +68,50 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
+    // Check the range of the channel.
+    struct iw_range range;
+    strncpy(req.ifr_name, argv[1], IFNAMSIZ - 1);
 
-#ifndef DEBUG
+    req.u.data.pointer = (caddr_t) &range;
+    req.u.data.length = sizeof(range);
+
+    if (ioctl(sockfd, SIOCGIWRANGE, &req) == -1) {
+        perror("get range fail");
+        close(sockfd);
+        return -1;
+    }
+    num_frequency = range.num_frequency;
+
+    //Setup CLI interface
     setup_monitor();
-#endif
 
-    // 5. 패킷 수신 루프
+    // Receive packets in a loop.
+    info res;
     while (1) {
+        if(stop) goto process_stop;
+
+        /*
+         * Extract info from packet.
+         * Recommend to check the actual packets using Wireshark.
+         * Filter: wlan.fc.type_subtype == 0x0008
+         * 
+         * Offset: exp
+         *      0: Radiotap header
+         *      8: Radiotap body??
+         *    8+N: beacon frame
+         *   40+N: beacon frame body
+        */
         unsigned char buf[65536];
         struct beacon_frame *beacon;
         struct ieee80211_radiotap_header *radiotap = (struct ieee80211_radiotap_header *)buf;
-        info res;
         ssize_t num_bytes = recvfrom(sockfd, buf, sizeof(buf), 0, NULL, NULL);
+
+        res.channal = chan;
         if (num_bytes < 0) {
             perror("recvfrom");
             break;
         }
-        //hexDump(buf, num_bytes);
+
         beacon = (struct beacon_frame *)(buf + radiotap->it_len);
         if(beacon->magic == 0x0080)
         {
@@ -128,25 +120,33 @@ int main(int argc, char *argv[]) {
             printf("Captured %zd bytes\n", num_bytes);
             print_addr("BSS ID: ",beacon->bss_id);
 #endif
+            memcpy(&(res.bssid),beacon->bss_id,6);
             parse_radiotap_body(radiotap->it_present, buf+sizeof(struct ieee80211_radiotap_header), beacon, &res);
             parse_becon_body((void *)beacon + sizeof(struct beacon_frame), buf+num_bytes, &res);
+            
+            submit_info(&res);
         }
 
     }
 
-    close(sockfd);
-    return 0;
+    process_stop:
+#ifndef DEBUG
+        pthread_join(monitor_thread, NULL);
+#endif
+        close(sockfd);
+        close(sock_ctl);
+        return 0;
 }
 
 void parse_becon_body(void *start, void *end, info *res)
 {
+#ifdef DEBUG 
     uint64_t *timestamp;
     uint16_t *interver;
     uint16_t *cap;
     timestamp = start;
     interver = start + 8;
     cap = start + 10;
-#ifdef DEBUG 
     printf("Timestamp: 0x%lx\n", *timestamp);
     printf("Interval: 0x%x\n", *interver);
     printf("Capa: 0x%x\n", *cap);
@@ -160,9 +160,10 @@ void parse_becon_body(void *start, void *end, info *res)
         {
             case TAG_SSID_NAME:
                 res->essid = (char *)pos;
+                res->length = len;
 #ifdef DEBUG 
                 printf("SSID(%d): %.*s\n", (int)len, (int)len, (char *)pos);
-#else           
+#else
                 return;
 #endif
                 break;
@@ -174,7 +175,6 @@ void parse_becon_body(void *start, void *end, info *res)
     }
 }
 
-#define NOT_YET() {asm volatile("int $3");}
 void parse_radiotap_body(uint32_t flags, void *start, void *end, info *res)
 {
     void *pos=start;
@@ -200,10 +200,10 @@ void parse_radiotap_body(uint32_t flags, void *start, void *end, info *res)
     if (flags & RADIOTAP_FHSS)                 { pos += 2; }  // FHSS
     if (flags & RADIOTAP_ANTENNA_SIGNAL)
     {
+        res->pwr=*(char *)pos;
 #ifdef DEBUG
         printf("dBm: %d\n", *(char *)pos);
 #else
-        res->pwr=*(char *)pos;
         return;
 #endif
         pos += 1;
@@ -235,7 +235,7 @@ void parse_radiotap_body(uint32_t flags, void *start, void *end, info *res)
         pos += length + padding;
 
     }  // TLV fields
-    if (flags & RADIOTAP_RADIOTAP_NAMESPACE)   { NOT_YET();}  // Radiotap Namespace
+    if (flags & RADIOTAP_RADIOTAP_NAMESPACE)   { BUILD_ERR();}  // Radiotap Namespace
     if (flags & RADIOTAP_VENDOR_NAMESPACE)
     { 
         pos += 6 + *(uint16_t *)(pos+4);
@@ -248,7 +248,7 @@ void parse_radiotap_body(uint32_t flags, void *start, void *end, info *res)
         if (flags & RADIOTAP_EHT)
         {
             //TODO Need to replace 0 to acutal user_num	
-            NOT_YET();
+            BUILD_ERR();
             pos += 40 + 4*(0);
         }  // EHT
      }
@@ -258,12 +258,185 @@ void parse_radiotap_body(uint32_t flags, void *start, void *end, info *res)
     {
         fprintf(stderr, "radiotap: %p, %p, %p\n", start, pos, end);
 	    fprintf(stderr, "radiotap header: parsing fail\n");
-        NOT_YET();
+        BUILD_ERR();
     }
 }
 
+/**
+ * @brief Set a stop sign for all threads.
+ * 
+ */
+void handle_sigint(int sig) {
+    printf("\b\b  \b\b");
+    stop=1;
+}
 
+void change_channal()
+{
+    chan++;
+    if(chan > num_frequency ) chan = 1;
+    req.u.freq.m = chan;
+    req.u.freq.e = 0; // MHz
+    if (ioctl(sockfd, SIOCSIWFREQ, &req) == -1){
+        perror("set channal fail");
+        _exit(1);
+    }
+}
+
+/**
+ * @brief The screen is refreshed at regular intervals
+ *  Data is checked by iterating through the hash map.
+ * 
+ */
+void *print_monitor(void *nouse)
+{
+    int line_cnt=0;
+    Node *cur;
+    while(1)
+    {
+        if(stop) 
+        {
+            printf("exit....\n");
+            return NULL;
+        }
+        for(int i=0;i<line_cnt;i++) printf("\033[A");
+        printf("CHN: (%02d)        BSSID PWR(dBm) BEACONS ESSID\n", chan);
+        line_cnt=1;
+        for(int i=0;i<MAP_MAX;i++)
+        {
+            for(cur=map[i];cur!=NULL && cur->next!=NULL ;cur = cur->next);
+            if(cur)
+            {
+                info *d = &(cur->data);
+                unsigned char *adr = d->bssid;
+                printf("\033[2K\r%3d: %02x:%02x:%02x:%02x:%02x:%02x %8d %7d %.*s\n",
+                d->channal, 
+                adr[0], adr[1], adr[2], adr[3], adr[4], adr[5],
+                d->pwr, d->beacon_cnt,
+                d->length, d->essid
+                );
+                line_cnt++;
+            }
+        }
+        change_channal();
+        usleep(100000);
+    }
+}
+
+/**
+ * @brief Set up Monitor thread to print CLI interface
+ * 
+ */
 void setup_monitor()
 {
+    memset(map, 0, sizeof(map));
+    
+#ifndef DEBUG
+    if(pthread_create(&monitor_thread, NULL, print_monitor, NULL))
+    {
+        fprintf(stderr, "thread create: setup fail\n");
+        _exit(1);
+    }
+#endif
+    signal(SIGINT, handle_sigint);
     return;
+}
+
+/**
+ * @brief Since a complex hash function is not needed, 
+ * implement it simply.
+ * 
+ * @param key The MAC address must be 6 bytes.
+ * @return int hash result
+ */
+int hash(addr key)
+{
+    unsigned int hash = 0;
+    for (int i = 0; i < 6; i++) {
+        hash = (hash * 31) + key[i];
+    }
+    return hash % MAP_MAX;
+}
+
+Node *make_node(info *res)
+{
+    Node *tmp = malloc(sizeof(Node));
+    if(!tmp)
+    {
+        fprintf(stderr, "Out of Memory\n");
+        return NULL;
+    }
+    memcpy(&(tmp->data), res, sizeof(info));
+    char *str= malloc(res->length+1);
+    if(!str)
+    {
+        free(tmp);
+        fprintf(stderr, "Out of Memory\n");
+        return NULL;
+    }
+    tmp->data.essid=str;
+    memcpy(str, res->essid, res->length);
+    tmp->data.beacon_cnt = 1;
+    return tmp;
+
+
+}
+
+
+
+/**
+ * @brief Store the data in the hash map. 
+ * If the MAC address already exists, update it.
+ * 
+ * @param res The input data is a pointer to the info structure.
+ */
+void submit_info(info* res)
+{
+    //Search for the initial key based on the hash table.
+    int index = hash(res->bssid);
+    Node *cur = map[index];
+    if(!cur)
+    {
+        cur = make_node(res);
+        map[index] = cur;
+        return;
+    }
+    
+    while(cur)
+    {
+        int len = res->length;
+        if(len != cur->data.length) goto next;
+        unsigned char *c1=cur->data.bssid; 
+        unsigned char *c2=res->bssid;
+
+        //Compares the keys of nodes.
+        for(int i=0; i< 6; i++) 
+        {
+            if(*c1!=*c2)
+                goto next;
+            c1++;
+            c2++;
+        }
+
+        //Found smae key
+        same:
+            cur->data.beacon_cnt++;
+            cur->data.pwr = res->pwr;
+            cur->data.channal = res->channal;
+            return;
+        
+        // If the keys are different, compare the next node
+        // in the list or execute "make node" 
+        // if it is the last node.
+        next:
+            if(!cur->next)
+            {
+                cur->next = make_node(res);
+                return;
+            }
+            cur = cur->next;
+    }
+
+    // Reaching this point might indicate a potential concurrency issue.
+    BUILD_ERR();
 }
