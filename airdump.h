@@ -86,5 +86,5 @@ int hash(addr key);
 void change_channal();
 void print_info(info* res);
 void print_addr(char *str, addr adr);
-
+int set_timeout(int sockfd, int seconds);
 #endif

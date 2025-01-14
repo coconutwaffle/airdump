@@ -24,6 +24,7 @@ int num_frequency;
 struct iwreq req;
 static int chan =0;
 pthread_t monitor_thread;
+static int timeout = 0;
 struct node* map[MAP_MAX];
 
 int main(int argc, char *argv[]) {
@@ -81,7 +82,7 @@ int main(int argc, char *argv[]) {
         return -1;
     }
     num_frequency = range.num_frequency;
-
+    set_timeout(sockfd, 3);
     //Setup CLI interface
     setup_monitor();
 
@@ -108,9 +109,14 @@ int main(int argc, char *argv[]) {
 
         res.channal = chan;
         if (num_bytes < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+                timeout = 1;
+                continue;
+            }
             perror("recvfrom");
             break;
-        }
+        } else timeout = 0;
 
         beacon = (struct beacon_frame *)(buf + radiotap->it_len);
         if(beacon->magic == 0x0080)
@@ -318,6 +324,12 @@ void *print_monitor(void *nouse)
                 line_cnt++;
             }
         }
+        
+        if(timeout)
+        {
+            printf("--Time out occured---\n");
+            line_cnt++;
+        }
         change_channal();
         usleep(100000);
     }
@@ -382,7 +394,37 @@ Node *make_node(info *res)
 
 }
 
+void change_name(Node *node, info *inf)
+{
+    if(node->data.length != inf->length) goto diff;
 
+    char *c1= node->data.essid;
+    char *c2= inf->essid;
+    for(int i=0;i<inf->length;i++)
+        if(c1++ != c2++) goto diff;
+    return;
+
+    diff:
+    if(node->data.length > inf->length)
+    {
+        node->data.length = inf->length;
+        memcpy(node->data.essid, inf->essid, inf->length);
+        return;
+    }
+
+    char *tmp = malloc(inf->length+1);
+    if(!tmp)
+    {
+        fprintf(stderr, "Out of Memory\n");
+        return;
+    } else
+    {
+        free(node->data.essid);
+        node->data.essid = tmp;
+        memcpy(tmp, inf->essid, inf->length);
+    }
+    
+}
 
 /**
  * @brief Store the data in the hash map. 
@@ -423,6 +465,7 @@ void submit_info(info* res)
             cur->data.beacon_cnt++;
             cur->data.pwr = res->pwr;
             cur->data.channal = res->channal;
+            change_name(cur, res);
             return;
         
         // If the keys are different, compare the next node
@@ -439,4 +482,24 @@ void submit_info(info* res)
 
     // Reaching this point might indicate a potential concurrency issue.
     BUILD_ERR();
+}
+
+
+int set_timeout(int sockfd, int seconds) {
+    struct timeval timeout;
+    timeout.tv_sec = seconds;  // 초 단위 설정
+    timeout.tv_usec = 0;       // 마이크로초 단위 설정 (0으로 초기화)
+
+    // 수신 타임아웃 설정
+    if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+        perror("setsockopt(SO_RCVTIMEO) failed");
+        return -1;
+    }
+
+    // 송신 타임아웃 설정
+    if (setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) < 0) {
+        perror("setsockopt(SO_SNDTIMEO) failed");
+        return -1;
+    }
+    return 0;
 }
