@@ -24,7 +24,7 @@ int num_frequency;
 struct iwreq req;
 static int chan =0;
 pthread_t monitor_thread;
-
+struct node* map[MAP_MAX];
 
 int main(int argc, char *argv[]) {
     struct ifreq ifr;

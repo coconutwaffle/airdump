@@ -1,5 +1,6 @@
 .PHONY: all clean debug
-SRC := airdump.c
+SRC = airdump.c
+SRC += debug.c
 OUT := airdump
 FLAGS := -lpthread -O2
 
