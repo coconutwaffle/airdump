@@ -85,7 +85,8 @@ typedef struct {
 typedef struct info info;
 typedef struct node Node;
 
-void parse_radiotap_body(uint32_t flags, void *start, void *end, info * res);
+void parse_radiotap(void *start, void *end, info *res, void *align_base);
+void *parse_radiotap_body(uint32_t flags, void *start, void *end, info * res, void *align_base);
 void parse_becon_body(void *start, void *end, info *res);
 void setup_monitor();
 void submit_info(info* res);
@@ -100,4 +101,5 @@ void init_spinlocks();
 void spinlock_lock(spinlock_t *lock);
 void spinlock_unlock(spinlock_t *lock);
 void del_node(Node *res);
+void print_bits(unsigned int num);
 #endif

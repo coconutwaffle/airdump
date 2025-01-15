@@ -125,10 +125,11 @@ int main(int argc, char *argv[]) {
 #ifdef DEBUG            
             printf("----------\n");
             printf("Captured %zd bytes\n", num_bytes);
+            hexDump(buf, num_bytes);
             print_addr("BSS ID: ",beacon->bss_id);
 #endif
             memcpy(&(res.bssid),beacon->bss_id,6);
-            parse_radiotap_body(radiotap->it_present, buf+sizeof(struct ieee80211_radiotap_header), beacon, &res);
+            parse_radiotap(buf, beacon, &res, buf);
             parse_becon_body((void *)beacon + sizeof(struct beacon_frame), buf+num_bytes, &res);
             
             res.last = time(NULL);
@@ -183,91 +184,204 @@ void parse_becon_body(void *start, void *end, info *res)
     }
 }
 
-void parse_radiotap_body(uint32_t flags, void *start, void *end, info *res)
+
+void parse_radiotap(void *start, void *end, info *res, void *align_base)
 {
-    void *pos=start;
-    
-    if (flags & RADIOTAP_EXT)
+    struct ieee80211_radiotap_header *radiotap = start;
+    void *pos = start + sizeof(struct ieee80211_radiotap_header);
+
+    uint32_t *flags = &(radiotap->it_present);
+    int num_flags=1;
+    while(flags[num_flags-1] & RADIOTAP_EXT)
     {
-        pos +=4;
+        num_flags++;
+        pos += 4;
     }
+
+
+    for(int i=0; i<num_flags;i++)
+    {
+        pos = parse_radiotap_body(flags[i], pos, end, res, align_base);
+    }
+}
+
+#define ALIGN_TO(pos, align_base, align_unit) \
+    do { \
+        if (((pos) - (align_base)) % (align_unit)) \
+            (pos) += (align_unit) - ((pos) - (align_base)) % (align_unit); \
+    } while (0)
+void *parse_radiotap_body(uint32_t flags, void *start, void *end, info *res, void *align_base)
+{
+#ifdef DEBUG
+    print_bits(flags);
+#endif
+    void *pos=start;
 
     
     if (flags & RADIOTAP_TSFT)
-    { 
-        //printf("TST: 0x%lx\n", *(uint64_t *)pos);
+    {
+        ALIGN_TO(pos, align_base, 8);
+#ifdef DEBUG
+        printf("TST: 0x%lx\n", *(uint64_t *)pos);
+#endif
         pos += 8;
     }
     if (flags & RADIOTAP_FLAGS)
     { 
-        //printf("flags: 0x%x\n", *(char *)pos);
+#ifdef DEBUG
+        printf("flags: 0x%x\n", *(char *)pos);
+#endif
         pos += 1;
     } 
-    if (flags & RADIOTAP_RATE)                 { pos += 1; }  // Rate
-    if (flags & RADIOTAP_CHANNEL)              { pos += 4; }  // Channel
-    if (flags & RADIOTAP_FHSS)                 { pos += 2; }  // FHSS
+    if (flags & RADIOTAP_RATE)                 
+    { 
+#ifdef DEBUG
+        printf("RATE: 0x%x\n", *(char *)pos);
+#endif
+        pos += 1; 
+    }
+    if (flags & RADIOTAP_CHANNEL)             
+    { 
+        ALIGN_TO(pos, align_base, 2);
+#ifdef DEBUG
+        printf("CHANNEL: 0x%x\n", *(unsigned int *)pos);
+#endif
+        pos += 4;
+    }
+    if (flags & RADIOTAP_FHSS)                 { pos += 2; }
     if (flags & RADIOTAP_ANTENNA_SIGNAL)
     {
         res->pwr=*(char *)pos;
 #ifdef DEBUG
-        printf("dBm: %d\n", *(char *)pos);
-#else
-        return;
+        printf("dBm: %d 0x%x\n", *(char *)pos, *(unsigned char *)pos);
 #endif
         pos += 1;
-    }  // Antenna signal
-    if (flags & RADIOTAP_ANTENNA_NOISE)        { pos += 1; }  // Antenna noise
-    if (flags & RADIOTAP_LOCK_QUALITY)         { pos += 2; }  // Lock quality
-    if (flags & RADIOTAP_TX_ATTENUATION)       { pos += 2; }  // TX attenuation
-    if (flags & RADIOTAP_DB_TX_ATTENUATION)    { pos += 2; }  // dB TX attenuation
-    if (flags & RADIOTAP_DBM_TX_POWER)         { pos += 1; }  // dBm TX power
-    if (flags & RADIOTAP_ANTENNA)              { pos += 1; }  // Antenna
-    if (flags & RADIOTAP_DB_ANTENNA_SIGNAL)    { pos += 1; }  // dB antenna signal
-    if (flags & RADIOTAP_DB_ANTENNA_NOISE)     { pos += 1; }  // dB antenna noise
-    if (flags & RADIOTAP_RX_FLAGS)             { pos += 2; }  // RX flags
-    if (flags & RADIOTAP_TX_FLAGS)             { pos += 2; }  // TX flags
-    if (flags & RADIOTAP_MCS)                  { pos += 3; }  // MCS
-    if (flags & RADIOTAP_AMPDU_STATUS)         { pos += 8; }  // A-MPDU status
-    if (flags & RADIOTAP_VHT)                  { pos += 12; }  // VHT
-    if (flags & RADIOTAP_TIMESTAMP)            { pos += 12; }  // Timestamp
-    if (flags & RADIOTAP_HE)                   { pos += 12; }  // HE
-    if (flags & RADIOTAP_HE_MU)                { pos += 12; }  // HE-MU
-    if (flags & RADIOTAP_HE_MU_OTHER_USER)     { pos += 6; }  // HE-MU-other-user
-    if (flags & RADIOTAP_ZERO_LENGTH_PSDU)     { pos += 1; }  // 0-length-PSDU
-    if (flags & RADIOTAP_L_SIG)                { pos += 4; }  // L-SIG
+    }
+    if (flags & RADIOTAP_ANTENNA_NOISE)        { pos += 1; }
+    if (flags & RADIOTAP_LOCK_QUALITY) 
+    {
+        ALIGN_TO(pos, align_base, 2); 
+        pos += 2; 
+    }
+    if (flags & RADIOTAP_TX_ATTENUATION)       
+    {
+        ALIGN_TO(pos, align_base, 2);  
+        pos += 2; 
+    }
+    if (flags & RADIOTAP_DB_TX_ATTENUATION)    
+    { 
+        ALIGN_TO(pos, align_base, 2); 
+        pos += 2; 
+    }
+    if (flags & RADIOTAP_DBM_TX_POWER)         { pos += 1; }
+    if (flags & RADIOTAP_ANTENNA) 
+    { 
+#ifdef DEBUG
+        printf("ANTENNA: 0x%x\n", *(char *)pos);
+#endif
+        pos += 1; 
+    }
+    if (flags & RADIOTAP_DB_ANTENNA_SIGNAL)    { pos += 1; }
+    if (flags & RADIOTAP_DB_ANTENNA_NOISE)     { pos += 1; }
+    if (flags & RADIOTAP_RX_FLAGS) 
+    { 
+        ALIGN_TO(pos, align_base, 2); 
+#ifdef DEBUG
+        printf("RX_FLAGS: 0x%x\n", *(uint16_t *)pos);
+#endif
+        pos += 2; 
+    }
+    if (flags & RADIOTAP_TX_FLAGS)             
+    { 
+        ALIGN_TO(pos, align_base, 2); 
+        pos += 2; 
+    }
+    if (flags & RADIOTAP_MCS)                  { pos += 3; }
+    if (flags & RADIOTAP_AMPDU_STATUS) 
+    { 
+        ALIGN_TO(pos, align_base, 4); 
+        pos += 8; 
+    }
+    if (flags & RADIOTAP_VHT)                  
+    {
+        ALIGN_TO(pos, align_base, 2); 
+        pos += 12; 
+    }
+    if (flags & RADIOTAP_TIMESTAMP)
+    { 
+        ALIGN_TO(pos, align_base, 8); 
+#ifdef DEBUG
+        printf("TimeStamp(8): 0x%lx\n", *(uint64_t *)pos);
+        printf("TimeStamp(4): 0x%x\n", *(uint32_t *)(pos+8));
+#endif
+        pos += 12; 
+    }
+    if (flags & RADIOTAP_HE)                   
+    {
+        ALIGN_TO(pos, align_base, 2);  
+        pos += 12; 
+    }
+    if (flags & RADIOTAP_HE_MU)                
+    { 
+        ALIGN_TO(pos, align_base, 2); 
+        pos += 12; 
+    }
+    if (flags & RADIOTAP_HE_MU_OTHER_USER)     
+    {
+        ALIGN_TO(pos, align_base, 2);  
+        pos += 6; 
+    }
+    if (flags & RADIOTAP_ZERO_LENGTH_PSDU)     { pos += 1; }
+    if (flags & RADIOTAP_L_SIG)                
+    {
+        ALIGN_TO(pos, align_base, 2);  
+        pos += 4; 
+    }
     if (flags & RADIOTAP_TLV_FIELDS)
     { 
-
-	int length = 4 + *(uint16_t *)(pos + 2);
-	int padding = (4 - (length & 3)) & 3;
+        ALIGN_TO(pos, align_base, 4); 
+        int length = 4 + *(uint16_t *)(pos + 2);
+        int padding = (4 - (length & 3)) & 3;
         pos += length + padding;
 
-    }  // TLV fields
-    if (flags & RADIOTAP_RADIOTAP_NAMESPACE)   { BUILD_ERR();}  // Radiotap Namespace
+    }
+    if (flags & RADIOTAP_RADIOTAP_NAMESPACE) ; //Nothing to do
     if (flags & RADIOTAP_VENDOR_NAMESPACE)
     { 
+        ALIGN_TO(pos, align_base, 2); 
         pos += 6 + *(uint16_t *)(pos+4);
-    }  // Vendor Namespace
-    if (flags & RADIOTAP_EXT)
+    }
+
+    if (0)
     {
         flags = *(uint32_t *)start;
-        if (flags & RADIOTAP_S1G)                  { pos += 6; }  // S1G
-        if (flags & RADIOTAP_U_SIG)                { pos += 8; }  // U-SIG
+        if (flags & RADIOTAP_S1G)                  
+        {
+            ALIGN_TO(pos, align_base, 2);  
+            pos += 6; 
+        }
+        if (flags & RADIOTAP_U_SIG)                
+        {
+            ALIGN_TO(pos, align_base, 4); 
+            pos += 8; 
+        }
         if (flags & RADIOTAP_EHT)
         {
             //TODO Need to replace 0 to acutal user_num	
+            ALIGN_TO(pos, align_base, 4); 
             BUILD_ERR();
             pos += 40 + 4*(0);
-        }  // EHT
+        }
      }
 
 
-    if(pos != end)
+    if(pos > end)
     {
         fprintf(stderr, "radiotap: %p, %p, %p\n", start, pos, end);
 	    fprintf(stderr, "radiotap header: parsing fail\n");
         BUILD_ERR();
     }
+    return pos;
 }
 
 /**
@@ -401,7 +515,7 @@ void *print_monitor(void *nouse)
             }
         }
 
-        for(;line_cnt+1<w.ws_row;line_cnt++, putchar('\n'))
+        for(;line_cnt + 1<w.ws_row;line_cnt++, putchar('\n'))
             printf("\033[K");
         
 
