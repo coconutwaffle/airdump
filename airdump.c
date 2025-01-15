@@ -26,6 +26,7 @@ static int chan =0;
 pthread_t monitor_thread;
 static int timeout = 0;
 struct node* map[MAP_MAX];
+spinlock_t lock[MAP_MAX];
 
 int main(int argc, char *argv[]) {
     struct ifreq ifr;
@@ -107,14 +108,14 @@ int main(int argc, char *argv[]) {
         struct ieee80211_radiotap_header *radiotap = (struct ieee80211_radiotap_header *)buf;
         ssize_t num_bytes = recvfrom(sockfd, buf, sizeof(buf), 0, NULL, NULL);
 
-        res.channal = chan;
+        res.channel = chan;
         if (num_bytes < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
             {
                 timeout = 1;
                 continue;
             }
-            perror("recvfrom");
+            if(errno != EINTR) perror("recvfrom");
             break;
         } else timeout = 0;
 
@@ -130,6 +131,7 @@ int main(int argc, char *argv[]) {
             parse_radiotap_body(radiotap->it_present, buf+sizeof(struct ieee80211_radiotap_header), beacon, &res);
             parse_becon_body((void *)beacon + sizeof(struct beacon_frame), buf+num_bytes, &res);
             
+            res.last = time(NULL);
             submit_info(&res);
         }
 
@@ -273,22 +275,63 @@ void parse_radiotap_body(uint32_t flags, void *start, void *end, info *res)
  * 
  */
 void handle_sigint(int sig) {
-    printf("\b\b  \b\b");
     stop=1;
 }
 
-void change_channal()
+void change_channel()
 {
     chan++;
     if(chan > num_frequency ) chan = 1;
+
+    retry:
     req.u.freq.m = chan;
     req.u.freq.e = 0; // MHz
     if (ioctl(sockfd, SIOCSIWFREQ, &req) == -1){
-        perror("set channal fail");
-        _exit(1);
+        if(chan!=1)
+        {
+            chan=1;
+            goto retry;
+        }
     }
 }
 
+int expire_node(int index, Node *prev, Node *cur, Node **next)
+{
+    time_t diff = difftime(time(NULL),cur->data.last);
+    if( diff > 5)
+    {
+        if(diff>10)
+        {
+            spinlock_lock(&lock[index]);
+            if(!prev)
+            {
+                map[index] = NULL;
+            }
+            else
+            {
+                prev->next = cur->next;
+            }
+            *next = cur->next;
+            spinlock_unlock(&lock[index]);
+            del_node(cur);
+            return 2;
+        }
+        return 1;
+
+    }
+
+    return 0;
+}
+void get_terminer_size(struct winsize *w)
+{
+    // Get terminel size
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, w) == 0) {
+        // printf("Terminal Rows: %d\n", w.ws_row);
+        // printf("Terminal Columns: %d\n", w.ws_col);
+    } else {
+        perror("ioctl error");
+    }
+}
 /**
  * @brief The screen is refreshed at regular intervals
  *  Data is checked by iterating through the hash map.
@@ -298,39 +341,71 @@ void *print_monitor(void *nouse)
 {
     int line_cnt=0;
     Node *cur;
+    Node *prev;
+    struct winsize w;
+    int warn;
+
+
+
     while(1)
     {
         if(stop) 
         {
-            printf("exit....\n");
+            printf("\033[2K\rexit....\n");
             return NULL;
         }
+        get_terminer_size(&w);
+        printf("\033[?25l");
         for(int i=0;i<line_cnt;i++) printf("\033[A");
-        printf("CHN: (%02d)        BSSID PWR(dBm) BEACONS ESSID\n", chan);
+        printf("\033[K\rCHN: (%02d)        BSSID PWR(dBm) BEACONS ESSID", chan);
+        if(timeout)
+            printf("\033[K\r---Time out occured---");
+        putchar('\n');
         line_cnt=1;
+
         for(int i=0;i<MAP_MAX;i++)
         {
-            for(cur=map[i];cur!=NULL && cur->next!=NULL ;cur = cur->next);
-            if(cur)
+            if(line_cnt + 2 > w.ws_row)
             {
-                info *d = &(cur->data);
-                unsigned char *adr = d->bssid;
-                printf("\033[2K\r%3d: %02x:%02x:%02x:%02x:%02x:%02x %8d %7d %.*s\n",
-                d->channal, 
-                adr[0], adr[1], adr[2], adr[3], adr[4], adr[5],
-                d->pwr, d->beacon_cnt,
-                d->length, d->essid
-                );
+                printf("\033[K\r---truncate-----");
                 line_cnt++;
+                break;
+            }
+            
+            cur=map[i];
+            prev = NULL;
+            while(cur!=NULL)
+            {
+                warn = expire_node(i, prev, cur, &cur);
+                if(warn == 2)
+                {
+                    continue;
+                }
+                info *data = &(cur->data);
+                unsigned char *adr = data->bssid;
+                printf("\033[K\r%3d: %02x:%02x:%02x:%02x:%02x:%02x %8d %7d ", 
+                    data->channel, 
+                    adr[0], adr[1], adr[2], adr[3], adr[4], adr[5],
+                    data->pwr, data->beacon_cnt
+                );
+
+                if(strlen(data->essid))
+                    printf("%.*s", data->length, data->essid);
+                else
+                    printf("\033[1;35mNo SSID\033[0m");
+                if(warn) printf("\033[31m--Time out--\033[0m");
+                putchar('\n');
+                line_cnt++;
+                prev = cur;
+                cur = cur->next;
             }
         }
+
+        for(;line_cnt+1<w.ws_row;line_cnt++, putchar('\n'))
+            printf("\033[K");
         
-        if(timeout)
-        {
-            printf("--Time out occured---\n");
-            line_cnt++;
-        }
-        change_channal();
+
+        change_channel();
         usleep(100000);
     }
 }
@@ -342,7 +417,7 @@ void *print_monitor(void *nouse)
 void setup_monitor()
 {
     memset(map, 0, sizeof(map));
-    
+    init_spinlocks();
 #ifndef DEBUG
     if(pthread_create(&monitor_thread, NULL, print_monitor, NULL))
     {
@@ -370,6 +445,13 @@ int hash(addr key)
     return hash % MAP_MAX;
 }
 
+__attribute__((noinline)) void del_node(Node *res)
+{
+    void *tmp = res->data.essid;
+    res->data.essid = NULL;
+    free(tmp);
+    free(res);
+}
 Node *make_node(info *res)
 {
     Node *tmp = malloc(sizeof(Node));
@@ -389,6 +471,7 @@ Node *make_node(info *res)
     tmp->data.essid=str;
     memcpy(str, res->essid, res->length);
     tmp->data.beacon_cnt = 1;
+    tmp->next = NULL;
     return tmp;
 
 
@@ -426,6 +509,8 @@ void change_name(Node *node, info *inf)
     
 }
 
+
+
 /**
  * @brief Store the data in the hash map. 
  * If the MAC address already exists, update it.
@@ -437,69 +522,74 @@ void submit_info(info* res)
     //Search for the initial key based on the hash table.
     int index = hash(res->bssid);
     Node *cur = map[index];
-    if(!cur)
-    {
-        cur = make_node(res);
-        map[index] = cur;
-        return;
-    }
+    if(!cur) goto not_found;
     
-    while(cur)
+
+    int len = res->length;
+    if(len != cur->data.length) goto not_found;
+    unsigned char *c1=cur->data.bssid; 
+    unsigned char *c2=res->bssid;
+
+    //Compares the keys of nodes.
+    for(int i=0; i< 6; i++) 
     {
-        int len = res->length;
-        if(len != cur->data.length) goto next;
-        unsigned char *c1=cur->data.bssid; 
-        unsigned char *c2=res->bssid;
-
-        //Compares the keys of nodes.
-        for(int i=0; i< 6; i++) 
-        {
-            if(*c1!=*c2)
-                goto next;
-            c1++;
-            c2++;
-        }
-
-        //Found smae key
-        same:
-            cur->data.beacon_cnt++;
-            cur->data.pwr = res->pwr;
-            cur->data.channal = res->channal;
-            change_name(cur, res);
-            return;
-        
-        // If the keys are different, compare the next node
-        // in the list or execute "make node" 
-        // if it is the last node.
-        next:
-            if(!cur->next)
-            {
-                cur->next = make_node(res);
-                return;
-            }
-            cur = cur->next;
+        if(*c1++!=*c2++)
+            goto not_found;
     }
 
-    // Reaching this point might indicate a potential concurrency issue.
-    BUILD_ERR();
+    //Found smae key
+    found:
+        cur->data.beacon_cnt++;
+        cur->data.pwr = res->pwr;
+        cur->data.channel = res->channel;
+        cur->data.last = time(NULL);
+        change_name(cur, res);
+        return;
+    
+    // No key founds, insert key
+    not_found:
+        Node *tmp = make_node(res);
+        tmp->next = map[index];
+        
+        spinlock_lock(&lock[index]);
+        map[index] = tmp;
+        spinlock_unlock(&lock[index]);
+        return;
+
 }
 
 
 int set_timeout(int sockfd, int seconds) {
     struct timeval timeout;
-    timeout.tv_sec = seconds;  // 초 단위 설정
-    timeout.tv_usec = 0;       // 마이크로초 단위 설정 (0으로 초기화)
+    timeout.tv_sec = seconds;
+    timeout.tv_usec = 0;
 
-    // 수신 타임아웃 설정
+
     if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
         perror("setsockopt(SO_RCVTIMEO) failed");
         return -1;
     }
 
-    // 송신 타임아웃 설정
+
     if (setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) < 0) {
         perror("setsockopt(SO_SNDTIMEO) failed");
         return -1;
     }
     return 0;
+}
+
+void init_spinlocks() {
+    for (int i = 0; i < MAP_MAX; i++) {
+        atomic_flag_clear(&(lock[i].lock_flag));
+    }
+}
+
+void spinlock_lock(spinlock_t *lock) {
+    while (atomic_flag_test_and_set(&lock->lock_flag)) {
+        // busy-wait
+    }
+}
+
+void spinlock_unlock(spinlock_t *lock) {
+    atomic_flag_clear(&lock->lock_flag);
 }

@@ -2,6 +2,9 @@
 #define AIRDUMP_25_1_10
 #include <ctype.h>
 #include <stdint.h>
+#include <stdatomic.h>
+#include <time.h>
+
 #define TAG_SSID_NAME 0
 #define TAG_RSN 48
 #define MAP_MAX 0x200
@@ -68,12 +71,16 @@ struct info {
     char *essid;
     int length;
     int beacon_cnt;
-    int channal;
+    int channel;
+    time_t last;
 };
 struct node {
     struct info data;
     struct node *next;
 };
+typedef struct {
+    atomic_flag lock_flag;
+} spinlock_t;
 
 typedef struct info info;
 typedef struct node Node;
@@ -83,8 +90,14 @@ void parse_becon_body(void *start, void *end, info *res);
 void setup_monitor();
 void submit_info(info* res);
 int hash(addr key);
-void change_channal();
+void change_channel();
 void print_info(info* res);
 void print_addr(char *str, addr adr);
 int set_timeout(int sockfd, int seconds);
+
+
+void init_spinlocks();
+void spinlock_lock(spinlock_t *lock);
+void spinlock_unlock(spinlock_t *lock);
+void del_node(Node *res);
 #endif
