@@ -129,6 +129,7 @@ int main(int argc, char *argv[]) {
             print_addr("BSS ID: ",beacon->bss_id);
 #endif
             memcpy(&(res.bssid),beacon->bss_id,6);
+            res.pwr = -128;
             parse_radiotap(buf, beacon, &res, buf);
             parse_becon_body((void *)beacon + sizeof(struct beacon_frame), buf+num_bytes, &res);
             
@@ -251,7 +252,8 @@ void *parse_radiotap_body(uint32_t flags, void *start, void *end, info *res, voi
     if (flags & RADIOTAP_FHSS)                 { pos += 2; }
     if (flags & RADIOTAP_ANTENNA_SIGNAL)
     {
-        res->pwr=*(char *)pos;
+        if(*(char *)pos > res->pwr)
+            res->pwr=*(char *)pos;
 #ifdef DEBUG
         printf("dBm: %d 0x%x\n", *(char *)pos, *(unsigned char *)pos);
 #endif
@@ -436,7 +438,7 @@ int expire_node(int index, Node *prev, Node *cur, Node **next)
 
     return 0;
 }
-void get_terminer_size(struct winsize *w)
+void get_terminel_size(struct winsize *w)
 {
     // Get terminel size
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, w) == 0) {
@@ -468,20 +470,33 @@ void *print_monitor(void *nouse)
             printf("\033[2K\rexit....\n");
             return NULL;
         }
-        get_terminer_size(&w);
+        
+        get_terminel_size(&w);
+
+
+        //clean window
         printf("\033[?25l");
         for(int i=0;i<line_cnt;i++) printf("\033[A");
-        printf("\033[K\rCHN: (%02d)        BSSID PWR(dBm) BEACONS ESSID", chan);
+        line_cnt = 0;
+
+        if(w.ws_col < 45)
+        {
+            printf("\033[2K\rToo small!!\n");
+            line_cnt++;
+            continue;
+        }
+
+        printf("\033[2K\rCHN: (%02d)        BSSID PWR(dBm) BEACONS ESSID", chan);
         if(timeout)
-            printf("\033[K\r---Time out occured---");
-        putchar('\n');
-        line_cnt=1;
+            printf("\033[2K\r---Time out occured---");
+        line_cnt++;
+
 
         for(int i=0;i<MAP_MAX;i++)
         {
-            if(line_cnt + 2 > w.ws_row)
+            if(line_cnt + 2 >= w.ws_row)
             {
-                printf("\033[K\r---truncate-----");
+                printf("\n\033[2K\r---truncate-----");
                 line_cnt++;
                 break;
             }
@@ -497,26 +512,47 @@ void *print_monitor(void *nouse)
                 }
                 info *data = &(cur->data);
                 unsigned char *adr = data->bssid;
-                printf("\033[K\r%3d: %02x:%02x:%02x:%02x:%02x:%02x %8d %7d ", 
+                int col_count;
+                int max_len;
+
+                col_count = printf("\n\033[2K\r\r%3d: %02x:%02x:%02x:%02x:%02x:%02x %8d %7d ", 
                     data->channel, 
                     adr[0], adr[1], adr[2], adr[3], adr[4], adr[5],
                     data->pwr, data->beacon_cnt
                 );
 
                 if(strlen(data->essid))
-                    printf("%.*s", data->length, data->essid);
+                {
+
+                    max_len = w.ws_col - col_count;
+                    if(  max_len < data->length)
+                    {
+                        col_count += printf("%.*s", max_len, data->essid);
+                    }
+                    else
+                        col_count += printf("%.*s", data->length, data->essid);
+                }
                 else
-                    printf("\033[1;35mNo SSID\033[0m");
-                if(warn) printf("\033[31m--Time out--\033[0m");
-                putchar('\n');
+                    col_count += printf("\033[1;35mNo SSID\033[0m");
+                if(warn)
+                {
+                    max_len = w.ws_col - col_count;
+                    printf("\033[31m");
+                    if(max_len > 0)
+                        printf("%.*s", max_len, "--Time out--");
+                    printf("\033[0m");
+                }
                 line_cnt++;
                 prev = cur;
                 cur = cur->next;
             }
         }
 
-        for(;line_cnt + 1<w.ws_row;line_cnt++, putchar('\n'))
-            printf("\033[K");
+        for(;line_cnt<w.ws_row;)
+        {
+            printf("\n\033[2K");
+            line_cnt++;
+        }
         
 
         change_channel();

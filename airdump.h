@@ -66,7 +66,6 @@ struct beacon_frame {
 
 struct info {
     char pwr;
-    char padding;
     addr bssid;
     char *essid;
     int length;
